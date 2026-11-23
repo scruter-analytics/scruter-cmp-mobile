@@ -1,0 +1,53 @@
+// The Android half of @scruter/react-native-cmp. Java only: an app's Kotlin version never matters here.
+// The React plugin runs the codegen of src/specs on both architectures: one module class, the generated spec's.
+apply plugin: 'com.android.library'
+apply plugin: 'com.facebook.react'
+
+def safeExt(String name, Object fallback) {
+  return rootProject.ext.has(name) ? rootProject.ext.get(name) : fallback
+}
+
+def reactNativeMinor() {
+  def file = new File(["node", "--print", "require.resolve('react-native/package.json')"].execute(null, rootDir).text.trim())
+  def version = new groovy.json.JsonSlurper().parse(file).version
+  return version.tokenize('.')[1] as int
+}
+
+android {
+  // Its own namespace: beside @scruter/react-native (net.scruter.reactnative), no class of one hides the other's.
+  namespace 'net.scruter.reactnative.cmp'
+  compileSdk safeExt('compileSdkVersion', 35)
+
+  defaultConfig {
+    minSdk Math.max(safeExt('minSdkVersion', 24) as int, 24)
+    targetSdk safeExt('targetSdkVersion', 35)
+    consumerProguardFiles 'proguard-rules.pro'
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  sourceSets {
+    main {
+      // BaseReactPackage came in 0.74; TurboReactPackage is what 0.73 has, deprecated since.
+      java.srcDirs += [reactNativeMinor() >= 74 ? 'src/rn74/java' : 'src/rn73/java']
+    }
+  }
+
+  lint {
+    abortOnError false
+  }
+}
+
+repositories {
+  google()
+  mavenCentral()
+}
+
+dependencies {
+  implementation 'com.facebook.react:react-android'
+  // implementation: the app's own compiler, which can be older than the module's, never reads its Kotlin metadata.
+  implementation 'net.scruter.cmp:scruter-cmp:1.0.0'
+}

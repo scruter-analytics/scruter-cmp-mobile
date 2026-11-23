@@ -1,0 +1,9 @@
+node_modules/
+lib/
+ios/sdk/
+*.tgz
+coverage/
+build/
+android/build/
+android/.gradle/
+android/.cxx/

@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+DerivedData/
+ios/ExampleCMP/*.xcodeproj/
+ios/ExampleCMP/SwiftUIApp/Info.plist
+ios/ExampleCMP/UIKitApp/Info.plist
+__pycache__/
+node_modules/

@@ -1,0 +1,23 @@
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        // This repository's own Android module (../android: publishReleasePublicationToStagingRepository); an app takes
+        // it from Maven Central through the plugin. The second one: Scruter Analytics' Android SDK from a checkout of
+        // scruter-mobile beside it, for the CI's builds with both SDKs (scripts/size.mjs).
+        maven { url = uri("${rootDir}/../../../android/build/staging") }
+        maven { url = uri("${rootDir}/../../../scruter-mobile/android/build/staging") }
+    }
+}
+
+rootProject.buildDir = "../build"
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}

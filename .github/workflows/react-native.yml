@@ -1,0 +1,294 @@
+# @scruter/react-native-cmp: Jest, the budget and the package; the example's debug build served by Metro on an Android
+# emulator and an iOS simulator, the oldest React Native on the old architecture and the latest on the new one, against
+# the CMP's stub ingest (first launch, decision, withdrawal, a JavaScript reload, a returning visitor); Expo's config
+# plugin; and an app with Scruter Analytics beside it (@scruter/react-native from scruter-mobile): both packages in one
+# release build, each one's code where it belongs, and what Scruter CMP adds (docs/CMP-MOBILE.md §3.16).
+name: react-native
+
+on:
+  push:
+    branches: ["main", "wip/**"]
+    paths: ["react-native/**", "ios/Sources/**", "ios/scripts/cmp_stub_ingest.py", "android/scruter-cmp/**", "protocol/**", ".github/workflows/react-native.yml"]
+  pull_request:
+    paths: ["react-native/**", "ios/Sources/**", "ios/scripts/cmp_stub_ingest.py", "android/scruter-cmp/**", "protocol/**", ".github/workflows/react-native.yml"]
+  workflow_dispatch:
+    inputs:
+      analytics_ref:
+        description: "The ref of scruter-analytics/scruter-mobile whose @scruter/react-native the size jobs build beside the CMP"
+        type: string
+        default: main
+  workflow_call:
+    inputs:
+      analytics_ref:
+        type: string
+        default: main
+
+concurrency:
+  group: react-native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  MAESTRO_VERSION: "2.12.1"
+  MAESTRO_CLI_NO_ANALYTICS: "1"
+  ANALYTICS_REF: ${{ inputs.analytics_ref || 'main' }}
+
+jobs:
+  js:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: react-native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci --no-audit --no-fund
+      - name: Types
+        run: npm run typecheck
+      - name: Jest (JavaScript layer, plugin)
+        run: npm test
+      - name: Budget (≤ 4 KB, min + gzip)
+        run: npm run budget
+      - name: The package
+        run: npm pack --dry-run
+
+  # The example's debug build, served by Metro: the JavaScript reload is a development tool.
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { rn: "0.73.11", arch: old }
+          - { rn: "0.88.1", arch: new }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: The Android module in the local Maven repository
+        working-directory: android
+        run: ./gradlew --no-daemon --max-workers=3 :scruter-cmp:publishToMavenLocal
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: The example for this version
+        working-directory: react-native/example
+        run: node setup.mjs --rn ${{ matrix.rn }} --arch ${{ matrix.arch }} --check
+      - name: Debug build
+        working-directory: react-native/example/android
+        env:
+          ORG_GRADLE_PROJECT_reactNativeArchitectures: x86_64
+        run: |
+          ./gradlew --no-daemon --max-workers=3 :app:assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk /tmp/cmp.apk
+      - name: Maestro
+        run: |
+          curl -fsSL -o /tmp/maestro.zip "https://github.com/mobile-dev-inc/maestro/releases/download/cli-$MAESTRO_VERSION/maestro.zip"
+          unzip -q /tmp/maestro.zip -d "$HOME"
+          echo "$HOME/maestro/bin" >> "$GITHUB_PATH"
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: default
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          working-directory: react-native
+          script: node scripts/device-check.mjs android /tmp/cmp.apk
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-${{ matrix.rn }}-${{ matrix.arch }}
+          path: react-native/build/device-check
+          retention-days: 7
+
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { rn: "0.73.11", arch: old }
+          - { rn: "0.88.1", arch: new }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Toolchain
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_16.4.app"
+          xcodebuild -version
+      - name: The example for this version
+        working-directory: react-native/example
+        run: node setup.mjs --rn ${{ matrix.rn }} --arch ${{ matrix.arch }} --check
+      - name: Pods
+        working-directory: react-native/example/ios
+        env:
+          RCT_NEW_ARCH_ENABLED: ${{ matrix.arch == 'new' && '1' || '0' }}
+        run: pod install
+      - name: Debug build for the simulator
+        id: build
+        working-directory: react-native/example/ios
+        run: |
+          udid=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)["devices"]
+          best = None
+          for rt, devs in d.items():
+              if "iOS" not in rt: continue
+              for x in devs:
+                  if x["name"].startswith("iPhone"):
+                      if best is None or rt > best[0]: best = (rt, x["udid"])
+          print(best[1])')
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+          xcodebuild -workspace ScruterExample.xcworkspace -scheme ScruterExample \
+            -configuration Debug -destination "id=$udid" -derivedDataPath build CODE_SIGN_IDENTITY=- \
+            -quiet build
+      - name: Maestro
+        run: |
+          curl -fsSL -o /tmp/maestro.zip "https://github.com/mobile-dev-inc/maestro/releases/download/cli-$MAESTRO_VERSION/maestro.zip"
+          unzip -q /tmp/maestro.zip -d "$HOME"
+          echo "$HOME/maestro/bin" >> "$GITHUB_PATH"
+      - name: Device check
+        working-directory: react-native
+        env:
+          MAESTRO_DRIVER_STARTUP_TIMEOUT: "300000"
+        run: |
+          xcrun simctl boot "${{ steps.build.outputs.udid }}"
+          xcrun simctl bootstatus "${{ steps.build.outputs.udid }}" -b
+          node scripts/device-check.mjs ios example/ios/build/Build/Products/Debug-iphonesimulator/ScruterExample.app
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-${{ matrix.rn }}-${{ matrix.arch }}
+          path: react-native/build/device-check
+          retention-days: 7
+
+  expo:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: The Android module in the local Maven repository
+        working-directory: android
+        run: ./gradlew --no-daemon --max-workers=3 :scruter-cmp:publishToMavenLocal
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: An Expo app, its plugin, no native edit
+        run: react-native/scripts/expo-check.sh android 58
+
+  # SDK 57: SDK 58's own Swift (expo-modules-jsi) does not compile with Xcode 26.3 (2026-11-22).
+  expo-ios:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Expo's own Swift packages need Xcode 26.
+      - name: Toolchain
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)"
+      - name: An Expo app, its plugin, pod install from npm alone
+        run: react-native/scripts/expo-check.sh ios 57
+
+  # An app with both SDKs, in release: Scruter Analytics alone, both, Scruter CMP alone; each build carries only its
+  # packages' code, and the difference is what Scruter CMP adds.
+  size-android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: scruter-analytics/scruter-mobile
+          ref: ${{ env.ANALYTICS_REF }}
+          path: scruter-mobile
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: The Android modules of both SDKs in the local Maven repository
+        run: |
+          (cd android && ./gradlew --no-daemon --max-workers=3 :scruter-cmp:publishToMavenLocal)
+          (cd scruter-mobile/android && ./gradlew --no-daemon --max-workers=3 :scruter-android:publishToMavenLocal)
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: The example with Scruter Analytics
+        working-directory: react-native/example
+        run: node setup.mjs --rn 0.88.1 --arch new --analytics "$GITHUB_WORKSPACE/scruter-mobile/react-native"
+      - name: Three builds
+        working-directory: react-native
+        run: |
+          node scripts/size.mjs android
+          cat build/size-android.txt >> "$GITHUB_STEP_SUMMARY"
+
+  size-ios:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: scruter-analytics/scruter-mobile
+          ref: ${{ env.ANALYTICS_REF }}
+          path: scruter-mobile
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: sudo xcode-select -s "/Applications/Xcode_16.4.app"
+      - name: The example with Scruter Analytics
+        working-directory: react-native/example
+        run: node setup.mjs --rn 0.88.1 --arch new --analytics "$GITHUB_WORKSPACE/scruter-mobile/react-native"
+      - name: Three builds
+        working-directory: react-native
+        run: |
+          node scripts/size.mjs ios
+          cat build/size-ios.txt >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,21 @@
+name: scruter_cmp_flutter_example
+description: The example of Scruter CMP for Flutter, a small shop with its Privacy screen.
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  scruter_cmp_flutter:
+    path: ../
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
